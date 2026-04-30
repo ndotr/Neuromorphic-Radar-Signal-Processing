@@ -1,0 +1,127 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+// RF neuron model derived from the CUBA LIF neuron model
+.RmwCA=1 // Read first internal state onf firs pass
+.RdcDA=1 // Read first dendritic acc on first paa
+.StrideCA=2 // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=2 // Number of da inputs owned by each neurons
+.StrideSA=1 // Number of output axon programs owned by each neuron
+.RmwDA=0 // Un-used (learning)
+.StridePA=0 // Un-used (learning)
+
+// CA: Neuron states
+// Persistent Memory over Time
+// Size: 64 bit = 8 bytes
+// => 4*2 bytes:        4 x words
+// => 2*3 + 1*2 bytes:  2 x longs + 1 x word
+// Optional read of internal state (True)
+
+// Resonating neuron states
+// Option:
+// - split into two neuron states: one processes real neuron state, next one imaginary state
+.mem:CA[0] {    // state number 0
+ ls im;         // imag state (2 bytes, signed)
+ ls re;         // real state (2 bytes, signed)
+ ws lct;        // real rotation factor: lambda*cosine(theta)*(1<<16) = 0x7ccb
+ bs lst;        // imag rotation factor: lambda*sine(theta)*(1<<16) = 0x1601
+}
+
+// Magnitude and Envelope Estimation states
+// Estimating magnitude with exponential filter of abs(real) + abs(imag)
+// Envelope with upper and width threshold 
+.mem:CA[1] {    // state number 1
+ lu upp;        // upper threshold, if mag>upper            -> mag = upper
+ lu low;        // width threshold, if (upper-mag)>width    -> width = upper - mag
+ ws grd;        // gradient estimate, state for LIF
+}
+
+// Constants over all neurons
+.constant:alpha_grd     // one over tau_grd: time constant for LIF
+.constant:beta_grd     // one over tau_grd: time constant for LIF
+.constant:grd_th        // threshold for LIF
+
+// Register (non-persitent memory)
+
+// Temporary register: da data in lower 4 bytes
+.var:da@t0ws    // da input: multiple inputs can be accessed in different passes
+.var:time@t7bs
+
+// Persistent between passes but not over time
+// Temporary storage
+// Rename it to be used in different passes
+.var:ltmp0@s0ls 
+.var:ltmp1@s3ls 
+.var:zero@s4bs
+.var:ltmp2@r0ls 
+.var:ltmp3@r3ls 
+
+// Real rotation
+:first
+mov         ltmp0   im 		            // copy of imaginary state for multiplication sin()*im
+mov         ltmp1   re                  // copy of real      state for multiplication sin()*re in next pass
+mul_rd      15      ltmp0   lst         // sin()*im                 of re = cos()*re - sin()*im + re_input
+mul_rd      15      re      lct         // cos()*re                 of re = cos()*re - sin()*im + re_input
+sub         re      ltmp0               // cos()*re - sin()*im      of re = cos()*re - sin()*im + re_input
+adl         da                          // add real input           of re = cos()*re - sin()*im + re_input
+rmw_ca      0                           // read (same) CA[0] on next pass
+rdc_da      1                           // read next DA[1] on next pass
+next
+
+// Imaginary rotation
+// adding abs(re) and abs(im)
+:second
+mul_rd      15      ltmp1   lst         // sin()*re                     of im = cos()*im + sin()*re + im_input
+mul_rd      15      im      lct         // cos()*im                     of im = cos()*im + sin()*re + im_input
+adl         ltmp1                       // cos()*im + sin()*re          of im = cos()*im + sin()*re + im_input
+adl         da                          // add imag input               of im = cos()*im + sin()*re + im_input
+abs         ltmp1   im                  // abs(im)                      of abs(re) + abs(im)
+abs         ltmp0   re                  // abs(re)                      of abs(re) + abs(im)
+adl         ltmp1                       // ltmp0 = abs(re) + abs(im)
+rmw_ca      1                           // read (next) CA[1] on next pass
+next
+
+// Magnitude estimation
+:upper
+rmw_ca      1                           // read (same) CA[1] on next pass
+cmp_skp_le  5       ltmp0     upp        // skip next two lines if mag < upper; do next lines if mag > upper
+mov         ltmp1   ltmp0
+sub         ltmp1   upp
+mov         upp     ltmp0                 // update upper limit
+mov         low     ltmp0                 // update lower limit
+jmp         gradient
+next
+
+:lower
+rmw_ca      1                           // read (same) CA[1] on next pass
+cmp_skp_le  4       low      ltmp0       // skip next lines if low < mag; do next lines if low > mag
+mov         ltmp1   low
+sub         ltmp1   ltmp0
+mov         low     ltmp0
+jmp         gradient
+jmp         compare
+next
+
+:gradient
+rmw_ca      1                           // read (same) CA[1] on next pass
+mul_rd      15      ltmp1   alpha_grd   // alpha * tmp                      of grd = grd - alpha * (grd + grd_rest - upp + wid)
+mul_rd      15      grd    beta_grd    // (1-alpha) * mag              of mag = (1 - alpha) * mag + alpha * (abs(re) + abs(im))
+adl         ltmp1
+next
+
+:compare
+cmp_skp_le  1       grd      grd_th     // skip next line if grd < u_th, else reset grd and spike
+//sub         grd     grd_th                        // reset grd
+spike       0

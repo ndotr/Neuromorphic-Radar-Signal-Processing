@@ -1,0 +1,50 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+// ----------------------------------------------------------------------------------- // 
+// ----------------------------------------------------------------------------------- // 
+// CA-CFAR for rate encoded spikes
+// cfar weights are set in synapse. Neuron only needs to check u>0 in last timestep
+// ----------------------------------------------------------------------------------- // 
+// ----------------------------------------------------------------------------------- // 
+
+.RmwCA=1        // Read first internal state on first pass
+.RdcDA=1        // Read first dendritic acc on first pass
+.StrideCA=1     // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=1     // Number of da inputs owned by each neurons
+.StrideSA=1     // Number of output axon programs owned by each neuron
+.RmwDA=0        // Un-used (learning)
+.StridePA=0     // Un-used (learning)
+
+.mem:CA[0] {
+ ls u;          
+ bu out;        // in-memory output for read out
+ wu ts;         // timestep counter since t7bu is limited to 255
+ wu;      
+}
+    
+// Constants over all neurons
+.constant:t_end
+.constant:offset
+
+// Temporary register: da data in lower 4 bytes
+.var:da@t0ws    
+:pass0
+add_sat         u           da
+add_sat         ts          1
+cmp_skp_ne      3           ts          t_end       // only check spike cond when ts==t_end
+cmp_skp_le      2           u           offset      // spiking cond: u>offset
+mov             out         1
+spike           0

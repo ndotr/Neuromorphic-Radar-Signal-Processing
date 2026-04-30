@@ -1,0 +1,165 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+// RF neuron model derived from the CUBA LIF neuron model
+.RmwCA=1 // Read first internal state onf first pass
+.RdcDA=0 // Read first dendritic acc on first paa
+.StrideCA=4 // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=2 // Number of da inputs owned by each neurons
+.StrideSA=1 // Number of output axon programs owned by each neuron
+.RmwDA=0 // Un-used (learning)
+.StridePA=0 // Un-used (learning)
+
+// CA: Neuron states
+// Persistent Memory over Time
+// Size: 64 bit = 8 bytes
+// => 4*2 bytes:        4 x words
+// => 2*3 + 1*2 bytes:  2 x longs + 1 x word
+// Optional read of internal state (True)
+
+// Init state
+.mem:CA[0] {    // state number 0
+ bu turnoff_neuron;        
+ wu time;         
+ wu silent;         
+ ls grd;         
+}
+
+// Resonating neuron states
+// Option:
+// - split into two neuron states: one processes real neuron state, next one imaginary state
+.mem:CA[1] {    // state number 0
+ ls re;         // real state (2 bytes, signed)
+ ls im;         // imag state (2 bytes, signed)
+ ws tmp;        // unused
+}
+
+.mem:CA[2] {    // state number 1
+ ls lct;        // real rotation factor: lambda*cosine(theta)*(1<<16) = 0x7ccb
+ ls lst;        // imag rotation factor: lambda*sine(theta)*(1<<16) = 0x1601
+ ws tmp;        // unused
+}
+
+// Magnitude and Envelope Estimation states
+// Estimating magnitude with exponential filter of abs(real) + abs(imag)
+// Envelope with upper and width threshold 
+.mem:CA[3] {    // state number 1
+ lu upp;        // upper threshold, if mag>upper            -> mag = upper
+ lu low;        // width threshold, if (upper-mag)>width    -> width = upper - mag
+ ws tmp;
+}
+
+// Constants over all neurons
+.constant:thresh_silent        // threshold for LIF
+.constant:thresh        // threshold for LIF
+.constant:start_time        // threshold for LIF
+.constant:alpha_grd     // one over tau_grd: time constant for LIF
+.constant:beta_grd     // one over tau_grd: time constant for LIF
+
+// Register (non-persitent memory)
+
+// Temporary register: da data in lower 4 bytes
+.var:da@t0ws    // da input: multiple inputs can be accessed in different passes
+//.var:time@t7bs
+
+// Persistent between passes but not over time
+// Temporary storage
+// Rename it to be used in different passes
+.var:ltmp0@s0ls
+.var:ltmp1@s3ls
+.var:ltmp2@r0ls
+.var:ltmp3@r3ls
+
+:init
+cmp_skp_ne  1 turnoff_neuron   1
+end
+add         time       1
+rmw_ca      1                           
+next
+
+:load_states
+mov         ltmp0   re
+mov         ltmp1   im
+mov         ltmp2   im
+mov         ltmp3   re
+rmw_ca      2
+rdc_da      0
+next
+
+:rotate_state
+mul_rd      8      ltmp0   lct     // c real
+mul_rd      8      ltmp1   lst     // s imag
+mul_rd      8      ltmp2   lct     // c imag
+mul_rd      8      ltmp3   lst     // s real
+sub         ltmp0   ltmp1
+adl         da
+rmw_ca      1
+rdc_da      1                           // read next DA[1] on next pass
+next
+
+:save_states
+add         ltmp2   ltmp3
+adl         da
+mov         re      ltmp0
+mov         im      ltmp2
+abs         ltmp2   im                  // abs(im)                      of abs(re) + abs(im)
+abs         ltmp0   re                  // abs(re)                      of abs(re) + abs(im)
+adl         ltmp2                       // ltmp0 = abs(re) + abs(im)
+rmw_ca      3
+next
+
+// Upper estimation
+:upper
+cmp_skp_le  7       ltmp0     upp        // skip next lines if mag < upper; do next lines if mag > upper
+mov         ltmp1   ltmp0
+sub         ltmp1   upp                   // ltmp1 = new_upper - upper
+mov         upp     ltmp0                 // update upper limit
+add         low     ltmp1                 // update lower limit by new_upper - upper
+mov         ltmp3   0                     // set flag to 0 if increase
+rmw_ca      0                           
+jmp         turnoff                     // if increase; then directly calculate gradient
+rmw_ca      3                            
+jmp         lower                       // otherwise; it could be decrease or within bounds
+
+
+// Lower estimation
+:lower
+mov         ltmp1   0                    // reset ltmp1 for changes in low
+cmp_skp_lt  3       low      ltmp0       // skip next lines if low < mag; do next lines if low > mag
+neg         ltmp1   low
+mov         low     ltmp0
+add         ltmp1    low
+mov         ltmp3   1                   // set flag to 1 if no increase
+rmw_ca      0                           // read CA[0] on next pass
+next
+
+:turnoff
+cmp_skp_eq  1   ltmp3   1
+mov         silent     0
+add         silent     ltmp3
+cmp_skp_le  2       silent     thresh_silent     // skip next line if grd < u_th, else reset grd and spike
+mov        turnoff_neuron      1
+end
+rmw_ca      0                           // read CA[0] on next pass
+next
+
+:spike
+cmp_skp_le  1   time      start_time
+add         grd      ltmp1
+cmp_skp_le  3   grd  thresh
+mov         da      grd
+//mov         da      grd
+//sub         grd     thresh
+spike       0

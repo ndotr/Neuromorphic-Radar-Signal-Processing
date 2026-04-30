@@ -1,0 +1,4 @@
+data_exp,timestamp,dataset,grad_threshold,thresh_silent,thresh_silent_chirp,monotonicity_thresh,t_monotonicity,detection_area,recall,precision,f_score,recall_ext,precision_ext,f_score_ext,iou_score_ext,inactive_percentage
+15,1761569120,/home/mgrabmann/data/BBM/level0_random_1dmax_randomrcs_8targets_32chirps_new/seed_1,0,200,34,-37,0,"[[1 1 1]
+ [1 1 1]
+ [1 1 1]]",0.6385144142421649,0.5411677440090333,0.5858245794880961,0.6963413293392695,0.7285006000262243,0.7120580356760402,0.5868814437259431,85.66140430365863

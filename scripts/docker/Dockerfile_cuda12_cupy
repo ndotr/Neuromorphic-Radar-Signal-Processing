@@ -1,0 +1,51 @@
+FROM cupy/cupy:v13.3.0
+
+LABEL Maintainer="nico.reeb"
+
+ENV TZ=Europe/Berlin \
+    DEBIAN_FRONTEND=noninteractive
+
+ARG USERNAME
+ARG UID
+ARG GID
+
+# -----------------------------
+# OS packages (+ python3)
+# -----------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    git \
+    vim \
+    sudo \
+    ssh \
+    libx11-dev \
+    tk \
+ && rm -rf /var/lib/apt/lists/*
+
+# Make sure "python" exists (some tooling expects it)
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# -----------------------------
+# User setup
+# -----------------------------
+RUN echo '%sudo ALL=(ALL:ALL) NOPASSWD:ALL' >> /etc/sudoers \
+ && groupadd --gid "${GID}" "${USERNAME}" \
+ && useradd  --uid "${UID}" --gid "${GID}" --create-home "${USERNAME}" \
+ && usermod -aG sudo "${USERNAME}"
+
+WORKDIR /workspace
+
+# -----------------------------
+# Python deps
+# -----------------------------
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+ && python3 -m pip install numpy matplotlib scipy pandas opencv-python-headless cantools
+
+# Switch to non-root for interactive use
+USER ${USERNAME}
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1

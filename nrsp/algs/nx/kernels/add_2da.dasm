@@ -1,0 +1,47 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+.RmwCA=1        // Read first internal state on first pass
+.RdcDA=1        // Read first dendritic acc on first pass
+.StrideCA=1     // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=2     // Number of da inputs owned by each neurons
+.StrideSA=1     // Number of output axon programs owned by each neuron
+.RmwDA=0        // Un-used (learning)
+.StridePA=0     // Un-used (learning)
+
+.mem:CA[0] {
+ ws s0;          
+ ws s1;
+ ws s2;
+ ws s3;
+}
+    
+// Aliases for variables
+// t0ls has da at the start of the update pass
+// and spike payload at the end of the pass
+.var:da@t0ws        // DendAccum input
+.var:payload@t0ws   // spike payload
+
+:first_input
+mov         s0      da
+rdc_da      1                       // read DA[1] in next pass
+rmw_ca      0
+next
+
+:second_input
+add         s0      da
+mov         payload s0              // send out DA[1]
+spike       0
+end

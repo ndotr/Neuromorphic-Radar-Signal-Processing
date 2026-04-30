@@ -1,0 +1,68 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+.RmwCA=1        // Read first internal state on first pass
+.RdcDA=1        // Read first dendritic acc on first pass
+.StrideCA=1     // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=2     // Number of da inputs owned by each neurons
+.StrideSA=1     // Number of output axon programs owned by each neuron
+.RmwDA=0        // Un-used (learning)
+.StridePA=0     // Un-used (learning)
+
+.mem:CA[0] {
+ bu t_inhib;    
+ bu active;     // 1 byte unsigned (bool), initialized to zero (False)
+ ws u;          
+ bu out;        // in-memory output for read out
+ wu ts;         // timestep counter since t7bu is limited to 255
+ bu;      
+}
+    
+// Constants over all neurons
+.constant:t_end
+
+// Temporary register: da data in lower 4 bytes
+.var:da@t0lu    // da input: first pass presynaptic, second neighbor
+.var:zero@s0bu  // zero for comparison ops (asm doesn't like explicit value /lava/proc/resfire/rf_zero_crossing.dasm)
+
+
+:neighbor_spike 
+add_sat         ts          1                       // increment timestep
+cmp_skp_eq      1           active      zero        // if (active) t_inhib--
+sub             t_inhib     1                       // if (active) t_inhib--
+sub             u           da                      // u -= da
+rmw_ca          0                                   // read mem:CA[0] in next pass
+rdc_da          1                                   // read presynaptic da input in next pass
+next
+
+:presynaptic_spike
+cmp_ne          da          zero                    // when presynaptic neuron spikes, activate neuron
+sel             active      1                       // if da!=0: active=1
+add             u           da                      // u += k (weight of k for presynaptic neuron)
+cmp_skp_ne      1           active      zero        // we can return incase neuron is inactive
+end
+rmw_ca          0                                   // read mem:CA[0] in next pass
+next
+
+// The neuron is active from the moment the presynaptic neuron spikes up until the moment the spiking condition is checked.
+// We want to check the spiking condition u > 0 at t + t_inhib, where t is the time the presynaptic neuron spikes.
+// If t + t_inhib is larger then t_end, we need to perform the check at t_end instead.
+:spike_cond
+cmp_skp_eq      1           ts          t_end       // 
+cmp_skp_ne      4           t_inhib     zero        // if t_inhib is still counting down, skip rest
+mov             active      0                       // we reached this line, so we are either at t_end or at t + t_inhib
+cmp_skp_le      2           u           zero        // spiking cond: u>0
+spike           0
+mov             out         1

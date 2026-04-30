@@ -1,0 +1,69 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+// ----------------------------------------------------------------------------------- // 
+// ----------------------------------------------------------------------------------- // 
+// log encode da input
+// da is unsigned word
+// resolution depends on tau and da scale
+// ----------------------------------------------------------------------------------- // 
+// ----------------------------------------------------------------------------------- // 
+
+.RmwCA=1        // Read first internal state on first pass
+.RdcDA=0        // Read first dendritic acc on first pass
+.StrideCA=1     // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=0     // Number of da inputs owned by each neurons
+.StrideSA=1     // Number of output axon programs owned by each neuron
+.RmwDA=0        // Un-used (learning)
+.StridePA=0     // Un-used (learning)
+
+.mem:CA[0] {
+ lu u;
+ bu block;
+ wu t_enc;
+ wu value;
+}
+   
+// Constants over all neurons
+.constant:tau_inv       // log encoding: (1/tau)*(1<<15)
+.constant:thresh
+
+// Temporary register: da data in lower 4 bytes
+// .var:da@t0wu    // da input: multiple inputs can be accessed in different passes
+
+// "s" register (persistent between passes, init to zero on first pass)
+.var:tmp0@s0lu
+.var:tmp1@s3ls 
+
+
+:log_encode_0
+cmp_skp_eq  1       block       0       // if blocked, return
+end
+add         t_enc   1
+mov         tmp1    thresh              // tmp1 = thresh
+//rdc_da      0                           // read da input on next pass
+rmw_ca      0                           // read CA[0] on next pass
+next
+
+
+:log_encode_1
+sub         tmp1        value                      // tmp1 = thresh - da
+mov         tmp0        u                       // tmp0 = u
+add_sat     tmp0        value                      // tmp0 = u + da
+mul_rz      15          tmp0        tau_inv     // tmp0 = (u + da) / tau
+add_sat     u           tmp0                    // u += (u + da) / tau
+cmp_skp_lt  2           u           tmp1        // spike cond: u >= thresh - da
+mov         block       1                       // block neuron from further spikes
+spike       0

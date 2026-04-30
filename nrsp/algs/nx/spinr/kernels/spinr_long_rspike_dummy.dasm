@@ -1,0 +1,55 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+// RF neuron model derived from the CUBA LIF neuron model
+.RmwCA=1 // Read first internal state onf first pass
+.RdcDA=0 // Read first dendritic acc on first paa
+.StrideCA=1 // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=2 // Number of da inputs owned by each neurons
+.StrideSA=1 // Number of output axon programs owned by each neuron
+.RmwDA=0 // Un-used (learning)
+.StridePA=0 // Un-used (learning)
+
+// CA: Neuron states
+// Persistent Memory over Time
+// Size: 64 bit = 8 bytes
+// => 4*2 bytes:        4 x words
+// => 2*3 + 1*2 bytes:  2 x longs + 1 x word
+// Optional read of internal state (True)
+
+// Init state
+.mem:CA[0] {    // state number 0
+ bu turnoff_neuron;        
+ wu time;         
+ wu silent;         
+ ls grd;         
+}
+
+// Register (non-persitent memory)
+
+// Temporary register: da data in lower 4 bytes
+.var:da@t0ls    // da input: multiple inputs can be accessed in different passes
+//.var:time@t7bs
+
+// Persistent between passes but not over time
+// Temporary storage
+// Rename it to be used in different passes
+.var:ltmp0@s0ls
+.var:ltmp1@s3ls
+.var:ltmp2@r0ls
+.var:ltmp3@r3ls
+
+:init
+end                       

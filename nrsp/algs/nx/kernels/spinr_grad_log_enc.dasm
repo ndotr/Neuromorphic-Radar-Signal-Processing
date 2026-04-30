@@ -1,0 +1,227 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+// ----------------------------------------------------------------------------------- //
+// ----------------------------------------------------------------------------------- // 
+// SpiNR Neuron with temporal log encoding:                                       
+// - relying on 'long' for real/imag, upper/lower and gradient states
+// - no da bit shift directly but instead by setting synapse weight exponent to e.g. -9
+// - gradient estimate as wu -> no negative values
+// - neuron is turned off if silent for t_silent 
+// - gradient estimate starts at t_grd
+// - encoding starts at t_enc
+// ----------------------------------------------------------------------------------- // 
+// ----------------------------------------------------------------------------------- // 
+
+.RmwCA=1        // Read first internal state on first pass
+.RdcDA=0        // Read first dendritic acc on first pass
+.StrideCA=5     // Number of 64-bit internal state entries owned by each neuron
+                // Init state including gradient
+                // Resonating neuron states
+                // Rotation factors
+                // Envelope states
+                // Log encoding states
+.StrideDA=2     // Number of da inputs owned by each neurons
+.StrideSA=1     // Number of output axon programs owned by each neuron
+.RmwDA=0        // Un-used (learning)
+.StridePA=0     // Un-used (learning)
+
+// Init state
+.mem:CA[0] {
+ wu time;       // time counter
+ bu turnoff;    // Flag whether neuron is turned off; should be reset after a frame (?)
+ bu block;
+ ls u;          // voltage
+ bu;
+}
+// Resonating neuron states
+.mem:CA[1] {
+ ls re;         // real state
+ ls im;         // imag state
+ ws;            // unused
+}
+// Rotation factors
+.mem:CA[2] {
+ ls lct;        // real rotation factor: lambda*cosine(theta)*(1<<15)
+ ls lst;        // imag rotation factor: lambda*sine(theta)*(1<<15)
+ ws;            // unused
+}
+// Envelope states
+.mem:CA[3] {
+ lu upp;        // upper threshold
+ lu low;        // width threshold
+ wu silent;     // Silent time counter: How long did neuron not change or spike
+}
+// Log encoding states
+.mem:CA[4] {
+ ls grd;          // encoding potential
+ wu;    // debug encoding output
+ bu;      // spike block
+ wu;
+}
+
+// Constants over all neurons
+.constant:alpha_grd     // alpha_gradient*(1<<15)
+.constant:beta_grd      // (1-alpha_gradient)*(1<<15)
+.constant:t_silent      // threshold for silent time
+.constant:t_grd         // gradient estimation starts at t=t_grd
+.constant:t_enc         // encoding starts at t=t_enc    
+.constant:tau_inv       // log encoding (1/tau)*(1<<15)
+.constant:thresh        // log encoding threshold
+.constant:n_samples
+
+// Temporary register: da data in lower 4 bytes
+// .var:da@t0ls    // da input: multiple inputs can be accessed in different passes
+.var:da@t0ws    // long or word signed
+
+// "s" register (persistent between passes, init to zero on first pass)
+.var:tmp0_ls@s0ls
+.var:tmp1_ls@s3ls
+.var:tmp2_ls@r0ls
+.var:tmp3_ls@r3ls
+
+.var:turnoff_@s7bu   
+.var:tmp0_bu@s6bu       // 0 if state increased, 1 if decrease or within bounds
+.var:time_@r6wu
+
+:init
+cmp_skp_ne  1       turnoff     1   // if neuron is turned off, skip all processing
+end                                 // stop neuron dynamics
+add         time    1               // increase time counter
+mov         time_   time               // increase time counter
+rmw_ca      1                       // open CA[1] (neuron states) in next pass
+next
+
+:load_states
+mov         tmp0_ls     re                  // tmp0_ls = re
+mov         tmp1_ls     im                  // tmp1_ls = im
+mov         tmp2_ls     im                  // tmp2_ls = im
+mov         tmp3_ls     re                  // tmp3_ls = re
+rmw_ca      2                               // load rotation factors
+rdc_da      0                               // load real synaptic input
+next
+
+:rotate_state
+mul_rd      8          tmp0_ls     lct     // tmp0_ls = re * lct
+mul_rd      8          tmp1_ls     lst     // tmp1_ls = im * lst
+mul_rd      8          tmp2_ls     lct     // tmp2_ls = im * lct
+mul_rd      8          tmp3_ls     lst     // tmp3_ls = re * lst
+sub         tmp0_ls     tmp1_ls             // tmp0_ls = re * lct - im * lst 
+add_sat     tmp0_ls     da                  // tmp0_ls = re * lct - im * lst + da_(re)
+rmw_ca      1                               // load states
+rdc_da      1                               // load imag synaptic input  
+next
+
+:save_states
+add_sat     tmp2_ls     tmp3_ls             // tmp2_ls = im * lct + re * lst
+add_sat     tmp2_ls     da                  // tmp2_ls = im * lct + re * lst + da_(im)
+mov         re          tmp0_ls             // re = re * lct - im * lst + da_(re)
+mov         im          tmp2_ls             // im = im * lct + re * lst + da_(im)
+abs         tmp2_ls     im                  // tmp2_ls = abs(im)
+abs         tmp0_ls     re                  // tmp0_ls = abs(re)
+add_sat     tmp0_ls     tmp2_ls             // tmp0_ls = abs(re) + abs(im) = mag
+rmw_ca      3                               // load upp and wid
+next
+// tmp0_ls = abs(re) + abs(im) = mag
+
+// Upper estimation
+:upper
+cmp_skp_le  7           tmp0_ls     upp     // skip next 6 lines if upper >= mag; do next lines if upper < mag
+// Magnitude outside of envelope: upper < mag
+mov         tmp1_ls     tmp0_ls             // tmp1_ls = mag
+sub         tmp1_ls     upp                 // tmp1_ls = mag - upp
+mov         upp         tmp0_ls             // upp = mag    
+add_sat     low         tmp1_ls             // low += delta
+//mov         silent      0                   // silent = 0 (reset silent counter)
+rmw_ca      4                               // load CA[0] init grad   
+jmp         gradient                        // no turnoff
+//
+rmw_ca      3                               // load CA[3] envelope states
+next                                        // mag <= upper, check lower bounds
+// tmp0_ls = abs(re) + abs(im) = mag
+// tmp1_ls = (mag - upp) * (mag>upp) = d_upp
+// silent = 0 if upper < mag
+
+
+// Lower estimation
+// if we are here: mag<=upp
+:lower
+mov         tmp1_ls     0                       // reset ltmp1 for changes in low
+//
+cmp_skp_lt  3           low         tmp0_ls     // skip next lines if low <= mag; do next lines if low > mag
+// Magnitude outside of envelope: mag <= low <= upper
+neg         tmp1_ls     low                     // tmp1_ls =  -low
+mov         low         tmp0_ls                 // low = tmp0_ls = mag = abs(re) + abs(im)
+add         tmp1_ls     low                     // tmp1_ls = mag (less than lower) - lower < 0s
+//
+//add         silent      1
+rmw_ca      3                                   // load CA[3] (silent) on next pass
+next
+// tmp1_ls = (mag - lower) * (lower > mag) < 0
+// tmp1_ls = 0 (lower < mag < upper)
+
+// Check whether to turn-off neuron
+:check_turnoff
+rmw_ca      4                                  // read CA[0] (init) on next pass
+//cmp_skp_le  1           silent     t_silent    // skip if silent < thresh_silent, do next lines if silent > thresh_silent
+//jmp         save_turnoff                            // turn off neuron if silent >= thresh_silent
+next
+
+// grd = (1-alpha) * grd + alpha * ((d_upp - d_wid)<<15-8)
+// bit shift gradient estimate (d_upp - d_wid) since we multiply it by a alpha around 0.001
+:gradient
+cmp_skp_ge  1           time_        t_grd       // if time < t_enc, return
+end
+mul_rd      8           grd         beta_grd    // grd = (1-alpha) * grd
+mul_rd      8           tmp1_ls     alpha_grd   // tmp1_ls = alpha * ((d_upp - d_wid)<<(15-shl_grd)) (potential overflow)
+add_sat     grd         tmp1_ls                 // grd = (1-alpha) * grd + alpha * ((d_upp - d_wid)<<15-8)
+mov         tmp2_ls     grd                     // tmp2_lu = grd                     
+rmw_ca      0      
+cmp_skp_ne  1           time_       n_samples
+jmp         spike_gradient
+next
+// tmp2_lu = grd
+
+:log_encode_0
+cmp_skp_ge  1           time_        t_enc       // if time < t_enc, return
+end
+cmp_skp_eq  1           block       0           // if blocked, return
+end
+mov         tmp1_ls     thresh                  // tmp1_lu = thresh
+sub         tmp1_ls     tmp2_ls                 // tmp1_lu = thresh - dmag
+rmw_ca      0     
+next
+// tmp1_lu = thresh - dmag
+// tmp2_lu = grd
+
+:log_encode_1
+sub         tmp2_ls     u                       // tmp2_lu = u + grd
+mul_rz      15          tmp2_ls     tau_inv     // tmp0_ls = (u + grd) / tau
+add_sat     u           tmp2_ls                 // u += (u + grd) / tau
+cmp_skp_lt  3           u           tmp1_ls     // spike cond: u >= thresh - grd
+mov         block       1                       // block neuron from further spikes
+jmp         spike_binary
+
+:spike_binary
+mov         da          1
+spike       0
+
+:spike_gradient
+mov         da          tmp2_ls 
+spike       0
+
+:save_turnoff
+mov         turnoff     1
+end

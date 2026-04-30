@@ -1,0 +1,21 @@
+# Computing parameters
+n_ranges: 512
+n_velocities: 32
+n_az_angles: 256
+# Radar parameters (fixed)
+n_ctrx: 4
+n_tx: 16
+n_rx: 16
+n_samples: 1024
+n_chirps: 512
+n_frames: 50
+n_az_vx: 64
+n_el_vx: 4
+n_padded_az: 78
+F_sampling: 25000000  # 50e6 / 2 -> 25 MS/s
+f_start: 78112000000        # [Hz] start frequency (78.112 GHz)
+f_delta_eff: 2048000000     # [Hz] effective RF bandwidth (2.048 GHz)
+f_step: 0                   # [Hz] frequency step each ramp (can be 1.53e6)
+t_wait: 3.02e-6             # [s] wait time
+t_pre: 2e-6                 # [s] pre ramp time
+t_flyback: 1e-6             # [s] flyback time

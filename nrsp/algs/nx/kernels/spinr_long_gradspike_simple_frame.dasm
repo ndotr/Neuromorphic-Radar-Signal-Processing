@@ -1,0 +1,186 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+///////////////////
+// SpiNR Neuron
+// 
+
+.RmwCA=1        // Read first internal state onf first pass
+.RdcDA=0        // Read first dendritic acc on first paa
+.StrideCA=4     // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=2     // Number of da inputs owned by each neurons
+.StrideSA=1     // Number of output axon programs owned by each neuron
+.RmwDA=0        // Un-used (learning)
+.StridePA=0     // Un-used (learning)
+
+// CA: Neuron states
+// Persistent Memory over Time
+// Size: 64 bit = 8 bytes
+// => 4*2 bytes:                4 x words
+// => 2*3 + 1*2 bytes:          2 x longs + 1 x word
+// => 1*3 + 2*2 + 1*1 bytes:    1 x long + 2 x words + 1 x byte
+// ...
+
+// Init state
+.mem:CA[0] {        // state number 0
+ bu turnoff;        // Flag whether neuron is turn on or off within a duration 
+ wu time;           // Time counter
+ wu silent;         // Silent time counter: How long did neuron not change or spike
+ ls grd;            // Gradient
+}
+
+// Resonating neuron states
+// Options:
+// - split into two neuron states: one processes real neuron state, next one imaginary state
+// - split into three neuron states: copy state, rotation state of real and imag, and add and copy state
+.mem:CA[1] {    // state number 0
+ ls re;         // real state (2 bytes, signed)
+ ls im;         // imag state (2 bytes, signed)
+ ws;            // unused, TODO?
+}
+
+.mem:CA[2] {    // state number 1
+ ls lct;        // real rotation factor: lambda*cosine(theta)
+ ls lst;        // imag rotation factor: lambda*sine(theta)
+ ws;            // unused, TODO?
+}
+
+// Envelope Estimation states
+// Envelope with upper and width threshold 
+.mem:CA[3] {    // state number 2
+ lu upp;        // upper threshold, if mag>upper            -> mag = upper
+ lu low;        // lower threshold, if (upper-mag)>width    -> width = upper - mag
+ ws tmp;
+}
+
+// Constants over all neurons
+.constant:thresh_grd
+.constant:thresh_spike_time     // threshold for chirp time: spike at the end of the chirp
+.constant:thresh_silent         // threshold for silent time
+.constant:thresh_start_time     // threshold for time: start time to estimate gradient and spike
+.constant:reset_time            // reset after one frame
+.constant:alpha_grd             // one over tau_grd: time constant for gradient
+.constant:beta_grd              // one over tau_grd: time constant for gradient
+
+// Register (non-persitent memory)
+// Temporary register: da data in lower 4 bytes
+.var:da@t0ws        // da input and output: multiple inputs can be accessed in different passes
+//.var:time@t7bs
+
+// Persistent between passes but not over time
+// Temporary storage
+// Rename it to be used in different passes
+.var:ltmp0@s0ls
+.var:ltmp1@s3ls
+.var:ltmp2@r0ls
+.var:ltmp3@r3ls
+.var:btmp0@s7bu
+.var:btmp1@r7bu
+
+:init
+cmp_skp_le  4   time   thresh_spike_time   // end of calculation; pass it through timesteps
+cmp_skp_le  1   time   reset_time   // end of calculation; pass it through timesteps
+mov         time       0
+add         time       1                    // increase time counter
+end
+add         time       1                    // increase time counter
+rmw_ca      1                               // open CA[1] (neuron states) in next pass
+next
+
+:load_states
+mov         ltmp0   re
+mov         ltmp1   im
+mov         ltmp2   im
+mov         ltmp3   re
+rmw_ca      2                       // open CA[2] (rotation vars) in next pass
+rdc_da      0                       // read DA[0] (real) in next pass
+next
+
+:rotate_state
+mul_rd      15      ltmp0   lct      // cos(theta) * state.real 
+mul_rd      15      ltmp1   lst      // sin(theta) * state.imag
+mul_rd      15      ltmp2   lct      // cos(theta) * state.imag
+mul_rd      15      ltmp3   lst      // sin(theta) * state.real
+sub         ltmp0   ltmp1           // cos(theta) * state.real - sin(theta) * state.imag
+adl         da                      // cos(theta) * state.real - sin(theta) * state.imag + input.real
+rmw_ca      1                       // open CA[1] (neuron states) in next pass
+rdc_da      1                       // read next DA[1] (imag) on next pass
+next
+
+:save_states
+add         ltmp2   ltmp3           // cos(theta) * state.imag + sin(theta) * state.real
+adl         da                      // cos(theta) * state.imag + sin(theta) * state.real + input.imag
+mov         re      ltmp0           // save updated real state
+mov         im      ltmp2           // save updated imag state
+abs         ltmp2   im              // abs(state.imag)
+abs         ltmp0   re              // abs(state.real)
+adl         ltmp2                   // mag = abs(state.real) + abs(state.imag)
+rmw_ca      3                       // open CA[3] (envelope) in next pass
+next
+
+// Upper estimation
+:upper
+cmp_skp_le  7       ltmp0     upp   // skip next lines if mag < upper; do next lines if mag > upper
+mov         ltmp1   ltmp0           // tmp save mag
+sub         ltmp1   upp             // delta = mag (greater than upper) - upper for lower update
+mov         upp     ltmp0           // update upper limit: upper = mag
+add         low     ltmp1           // update lower limit: lower = lower + delta
+mov         btmp0   0               // set flag to 0 if increase
+rmw_ca      0                       // read CA[0] (init) in next pass
+jmp         gradient                 // if increase; then directly calculate gradient
+rmw_ca      3                       // read CA[3] (envelope) in next pass  
+next                   // else; stay in CA[3]
+                                    // it could be decrease or within bounds (check in lower pass)
+
+// Lower estimation
+:lower
+mov         ltmp1   0               // reset ltmp1 for changes in low
+cmp_skp_lt  3       low      ltmp0  // skip next lines if low < mag; do next lines if mag < low
+neg         ltmp1   low             // (mag < low) tmp save -lower
+mov         low     ltmp0           // (mag < low) lower = mag, since lower > mag
+add         ltmp1   low             // (mag < low) delta = mag (less than lower) - lower < 0s
+mov         btmp0   1               // set flag to 1 if no increase (but decrease or within bounds)
+rmw_ca      0                       // read CA[0] (init) on next pass
+next
+
+
+:gradient
+cmp_skp_le  3   time thresh_start_time    // skip if time < thresh_time, do next lines if time > thresh_time
+mul_rd      8   grd    beta_grd
+mul_rd      8   ltmp1  alpha_grd
+add         grd     ltmp1          // (time > thresh_time) grad = grad + delta
+mov         ltmp1   grd
+cmp_skp_lt  2   time thresh_spike_time  // continue if time == thresh_chirp, stop if time != thresh 
+rmw_ca      3                       // read CA[0] (init) on next pass
+next
+end
+
+:reset
+mov     upp     0
+mov     low     0
+rmw_ca      0                       // read CA[0] (init) on next pass
+next
+
+:reset2
+mov     grd     0
+rmw_ca      1                       // read CA[0] (init) on next pass
+next
+
+:spike
+mov         re  0
+mov         im  0
+cmp_skp_le  2 ltmp1 thresh_grd
+mov         da  ltmp1
+spike       0                       // spike

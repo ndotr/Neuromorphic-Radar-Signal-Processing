@@ -1,0 +1,21 @@
+# input
+input_type: 1  # [1: from file, 2: from pipe, 3: dummy data]
+output_type: 1  # [1: to file, 2: to pipe]
+measurement_file: "/home/nreeb/data/Naomi4Radar/20250925_Immendingen01/2025-09-25_16-00-52/Radar/Radar_2025-09-25_16-00-52.hdf5"  # Directory containing CTRX binary files.
+#measurement_file: "/home/nreeb/data/Naomi4Radar/20250925_seperation_debug/2025-09-25_15-27-08/Radar/Radar_2025-09-25_15-27-08.hdf5"  # Directory containing CTRX binary files.
+#measurement_file: "/home/nreeb/data/Naomi4Radar/20250925_seperation_debug/2025-09-25_15-32-37/Radar/Radar_2025-09-25_15-32-37.hdf5"  # Directory containing CTRX binary files.
+#measurement_file: "/home/nreeb/data/Naomi4Radar/20250925_seperation_debug/2025-09-25_15-40-13/Radar/Radar_2025-09-25_15-40-13.hdf5"
+#measurement_file: "/home/nreeb/data/Naomi4Radar/20250925_seperation_debug/2025-09-25_15-41-16/Radar/Radar_2025-09-25_15-41-16.hdf5"
+
+# filtering
+filter_output_format: 0  # [0: range doppler map, 1: range angle map]
+RX_antenna: 0 # [0 ... n_rx-1]
+TX_antenna: 0 #[0 ... n_tx-1]
+chirp_idx: 2  # chirp_idx [N*n_tx]
+
+# dummy data: Target definitions  ->  values in units of bins
+amplitudes: [1, 0.1, 1]
+ranges: [10, 20, 256]
+angles: [0, -8, 16]
+velocities: [4, -16, 24]
+noise_std: 0.1

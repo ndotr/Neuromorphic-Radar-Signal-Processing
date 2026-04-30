@@ -1,0 +1,246 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+// ----------------------------------------------------------------------------------- //
+// ----------------------------------------------------------------------------------- //             
+// Range-Doppler SpiNR neuron
+// ----------------------------------------------------------------------------------- // 
+// ----------------------------------------------------------------------------------- // 
+
+.RmwCA=1        // Read first internal state on first pass
+.RdcDA=0        // Read first dendritic acc on first pass
+.StrideCA=5     // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=1     // Number of da inputs owned by each neurons
+.StrideSA=1     // Number of output axon programs owned by each neuron
+.RmwDA=0        // Un-used (learning)
+.StridePA=0     // Un-used (learning)
+
+
+.mem:CA[0] {
+ ls grd;        // gradient
+ wu chirp_time; // time counter; gets reset every chrip
+ wu time;       // time counter;
+ bu turnoff;    // turnoff flag
+}
+.mem:CA[1] {
+ ls re;         // real state
+ ls im;         // imag state
+ ws _;
+}
+.mem:CA[2] {
+ ws r_lct;      // range rotation factor: lambda*cosine(theta)*(1<<15)
+ ws r_lst;      // range rotation factor: lambda*sine(theta)*(1<<15)
+ ws d_lct;      // doppler rotation factor:
+ ws d_lst;      // doppler rotation factor:
+}
+.mem:CA[3] {
+ lu upp;        // upper
+ lu low;        // lower
+ wu silent;
+}
+.mem:CA[4] {
+ lu u;          // encoding potential
+ wu out_enc;    // debug encoding output
+ lu _;
+}
+
+// Constants over all neurons
+.constant:alpha_grd     // alpha_gradient*(1<<15)
+.constant:beta_grd      // (1-alpha_gradient)*(1<<15)
+.constant:grd_sh        // shift factor to scale gradient estimate: alpha_grd * ((d_upp - d_low)<<(15-grd_sh))
+.constant:tau_inv       // log encoding (1/tau)*(1<<15)
+.constant:thresh        // log encoding threshold
+.constant:t_enc         // encoding starts at t=t_enc    
+.constant:n_samples
+.constant:thresh_silent // turnoff threshold
+
+
+// Temporary register: da data in lower 4 bytes
+.var:da@t0ls    // da input: multiple inputs can be accessed in different passes
+
+// "s" register (persistent between passes, init to zero on first pass)
+.var:tmp0_ls@s0ls
+.var:tmp1_ls@s3ls
+.var:tmp2_ls@r0ls
+.var:tmp3_ls@r3ls
+
+.var:tmp0_lu@s0lu
+.var:tmp1_lu@s3lu
+.var:tmp2_lu@r0lu
+.var:tmp3_lu@r3lu
+
+.var:time_@r6wu
+.var:chirp_time_@s6wu   // only needed up to :load_states, can be reused afterwards
+.var:tmp0_bu@s6bu       // 0 if state increased, 1 if decrease or within bounds
+.var:turnoff_@s7bu   
+
+
+
+:init
+//cmp_skp_eq  1               turnoff         0               // if neuron is off, return
+//end
+cmp_skp_lt  1               chirp_time       n_samples      // chirp_time = chirp_time % n_samples
+mov         chirp_time      0                               // chirp_time = chirp_time % n_samples
+mov         time_           time                            // store time
+mov         chirp_time_     chirp_time                      // store chirp_time
+add         time            1                               // increment time
+add         chirp_time      1                               // increment chirp_time
+rmw_ca      1                                               // load re/im states
+next
+
+
+:load_states
+mov         tmp0_ls     re                  // tmp0_ls = re
+mov         tmp1_ls     im                  // tmp1_ls = im
+mov         tmp2_ls     im                  // tmp2_ls = im
+mov         tmp3_ls     re                  // tmp3_ls = re
+rmw_ca      2                               // load rotation factors
+cmp_skp_eq  2           chirp_time_      0  // skip doppler rotation unless chirp_time==0, TOOD errors if comp to 0 directly? or does it work
+rdc_da      0                               // load real synaptic input
+jmp         rotate_state_range              //
+next
+
+
+// rotate internal state every chirp for doppler estimation
+:rotate_state_doppler
+mul_rd      15          tmp0_ls     d_lct   // tmp0_ls = re * d_lct
+mul_rd      15          tmp1_ls     d_lst   // tmp1_ls = im * d_lst
+mul_rd      15          tmp2_ls     d_lct   // tmp2_ls = im * d_lct
+mul_rd      15          tmp3_ls     d_lst   // tmp3_ls = re * d_lst
+sub         tmp0_ls     tmp1_ls             // tmp0_ls = re * d_lct - im * d_lst
+add_sat     tmp2_ls     tmp3_ls             // tmp2_ls = im * d_lct + re * d_lst
+rmw_ca      2                               // load rotation factors
+rdc_da      0                               // load real synaptic input
+next
+
+
+// reinit temps 
+:rotate_state_doppler_2
+mov         tmp3_ls     tmp0_ls
+mov         tmp1_ls     tmp2_ls
+rmw_ca      2                               // load rotation factors
+rdc_da      0                               // load real synaptic input
+next
+// tmp0_ls = re
+// tmp1_ls = im
+// tmp2_ls = im
+// tmp3_ls = re
+
+
+// rotate internal state for range estimation
+// add real da input
+:rotate_state_range
+mul_rd      15          tmp0_ls     r_lct   // tmp0_ls = re * r_lct
+mul_rd      15          tmp1_ls     r_lst   // tmp1_ls = im * r_lst
+mul_rd      15          tmp2_ls     r_lct   // tmp2_ls = im * r_lct
+mul_rd      15          tmp3_ls     r_lst   // tmp3_ls = re * r_lst
+sub         tmp0_ls     tmp1_ls             // tmp0_ls = re * r_lct - im * r_lst
+add_sat     tmp0_ls     da                  // tmp0_ls = re * r_lct - im * r_lst + da_(re)
+rmw_ca      1                               // load states
+next
+
+
+// add imaginary da input
+// save states
+// compute magnitude
+:save_states
+add_sat     tmp2_ls     tmp3_ls             // tmp2_ls = im * r_lct + re * r_lst
+mov         re          tmp0_ls             // re = re * r_lct - im * r_lst + da_(re)
+mov         im          tmp2_ls             // im = im * r_lct + re * r_lst + da_(im)
+abs         tmp2_ls     im                  // tmp2_ls = abs(im)
+abs         tmp0_ls     re                  // tmp0_ls = abs(re)
+add_sat     tmp0_ls     tmp2_ls             // tmp0_ls = abs(re) + abs(im) = mag
+rmw_ca      3                               // load upp and low
+next
+// tmp0_ls = abs(re) + abs(im) = mag
+
+
+// Upper estimation
+:upper
+cmp_skp_le  7           tmp0_ls     upp     // skip next 6 lines if mag <= upp
+mov         tmp1_ls     tmp0_ls             // | tmp1_ls = mag
+sub         tmp1_ls     upp                 // | tmp1_ls = mag - upp = delta
+mov         upp         tmp0_ls             // | upp = mag  
+add_sat     low         tmp1_ls             // | low += delta
+mov         silent      0                   // | silent = 0 (reset silent counter)
+rmw_ca      0                               // | load grad   
+jmp         turnoff                         // | 
+rmw_ca      3                               // load upp and low
+next
+// tmp0_ls = abs(re) + abs(im) = mag
+// | tmp1_ls = (mag - upp) * (mag>upp) = delta
+// | silent = 0
+
+
+// Lower estimation
+// if we are here: mag <= upp
+:lower            
+mov         tmp1_ls     0
+cmp_skp_le  3           low         tmp0_ls // skip next lines if low <= mag (within bounds)
+neg         tmp1_ls     low                 // | tmp1_ls = -low
+mov         low         tmp0_ls             // | low = mag
+add         tmp1_ls     tmp0_ls             // | tmp1_ls = mag - low (= -d_low < 0)
+add         silent      0                   // silent += 1
+rmw_ca      3                               // load silent
+next
+// tmp1_ls = delta
+// silent += 1
+
+
+// Check whether to turn-off neuron
+:turnoff
+cmp_skp_lt  2               silent     thresh_silent    // turn off neuron if silent >= thresh_silent
+mov         turnoff_        1                           // turn off neuron if silent >= thresh_silent
+jmp         save_turnoff                                // turn off neuron if silent >= thresh_silent
+rmw_ca      0                                   
+next
+
+
+// grd = (1-alpha) * grd + alpha * (delta<<15-grd_sh)
+// bit shift gradient estimate delta since we multiply it by a alpha around 0.001
+:gradient
+mul_rd      15          grd         beta_grd    // grd = (1-alpha) * grd
+mul_rd      grd_sh      tmp1_ls     alpha_grd   // tmp1_ls = alpha * (delta<<(15-shl_grd)) (potential overflow)
+add_sat     grd         tmp1_ls                 // grd = (1-alpha) * grd + alpha * (delta<<15-grd_sh)
+mov         tmp2_lu     grd                     // tmp2_lu = grd                     
+next
+// tmp2_lu = grd
+
+
+:log_encode_0
+cmp_skp_ge  1           time_       t_enc       // if time < t_enc, return
+end
+mov         tmp1_lu     thresh                  // tmp1_lu = thresh
+sub         tmp1_lu     tmp2_lu                 // tmp1_lu = thresh - grd
+rmw_ca      4     
+next
+// tmp1_lu = thresh - grd
+// tmp2_lu = grd
+
+
+:log_encode_1
+add         out_enc     1
+add_sat     tmp2_lu     u                       // tmp2_lu = u + grd
+mul_rz      15          tmp2_lu     tau_inv     // tmp0_ls = (u + grd) / tau
+add_sat     u           tmp2_lu                 // u += (u + grd) / tau
+cmp_skp_lt  3           u           tmp1_lu     // spike cond: u >= thresh - grd
+mov         turnoff_    1                       // turn neuron off
+spike       0
+rmw_ca      0                                   // load turnoff     
+next
+
+
+:save_turnoff
+mov         turnoff     0

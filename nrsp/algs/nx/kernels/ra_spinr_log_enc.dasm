@@ -1,0 +1,187 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+// ----------------------------------------------------------------------------------- //
+// ----------------------------------------------------------------------------------- // 
+// Range-Angle SpiNR Neuron with temporal log encoding:                                       
+// - no da bit shift directly but instead by setting synapse weight exponent to e.g. -9
+// - gradient estimate as wu -> no negative values
+// - gradient estimate starts at t_grd
+// - encoding starts at at_enc
+// ----------------------------------------------------------------------------------- // 
+// ----------------------------------------------------------------------------------- // 
+
+.RmwCA=1        // Read first internal state on first pass
+.RdcDA=0        // Read first dendritic acc on first pass
+.StrideCA=5     // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=2     // Number of da inputs owned by each neurons
+.StrideSA=1     // Number of output axon programs owned by each neuron
+.RmwDA=0        // Un-used (learning)
+.StridePA=0     // Un-used (learning)
+
+
+.mem:CA[0] {
+ lu grd;        // gradient
+ wu time;       // time counter
+ lu _;
+}
+.mem:CA[1] {
+ ls re;         // real state
+ ls im;         // imag state
+ ws _;
+}
+.mem:CA[2] {
+ ls lct;        // real rotation factor: lambda*cosine(theta)*(1<<15)
+ ls lst;        // imag rotation factor: lambda*sine(theta)*(1<<15)
+ ws _;
+}
+.mem:CA[3] {
+ lu upp;        // upper threshold
+ lu wid;        // width threshold
+ ws _;
+}
+.mem:CA[4] {
+ lu u;          // encoding potential
+ wu out_enc;    // debug encoding output
+ bu block;      // spike block
+ wu _;
+}
+
+// Constants over all neurons
+.constant:alpha_grd     // alpha_gradient*(1<<15)
+.constant:beta_grd      // (1-alpha_gradient)*(1<<15)
+.constant:grd_sh        // shift factor to scale gradient estimate: alpha_grd * ((d_upp - d_wid)<<(15-grd_sh))
+.constant:t_grd         // gradient estimation starts at t=t_grd
+.constant:tau_inv       // log encoding (1/tau)*(1<<15)
+.constant:thresh        // log encoding threshold
+.constant:t_enc         // encoding starts at t=t_enc    
+
+// Temporary register: da data in lower 4 bytes
+.var:da@t0ls    // da input: multiple inputs can be accessed in different passes
+
+// "s" register (persistent between passes, init to zero on first pass)
+.var:tmp0_ls@s0ls
+.var:tmp1_ls@s3ls
+.var:tmp2_ls@r0ls
+.var:tmp3_ls@r3ls
+
+.var:tmp0_lu@s0lu
+.var:tmp1_lu@s3lu
+.var:tmp2_lu@r0lu
+.var:tmp3_lu@r3lu
+
+
+:init
+add         time       1
+rmw_ca      1                           
+next
+
+:load_states
+mov         tmp0_ls     re                  // tmp0_ls = re
+mov         tmp1_ls     im                  // tmp1_ls = im
+mov         tmp2_ls     im                  // tmp2_ls = im
+mov         tmp3_ls     re                  // tmp3_ls = re
+rmw_ca      2                               // load rotation factors
+rdc_da      0                               // load real synaptic input
+next
+
+:rotate_state
+mul_rd      15          tmp0_ls     lct     // tmp0_ls = re * lct
+mul_rd      15          tmp1_ls     lst     // tmp1_ls = im * lst
+mul_rd      15          tmp2_ls     lct     // tmp2_ls = im * lct
+mul_rd      15          tmp3_ls     lst     // tmp3_ls = re * lst
+sub         tmp0_ls     tmp1_ls             // tmp0_ls = re * lct - im * lst
+add_sat     tmp0_ls     da                  // tmp0_ls = re * lct - im * lst + da_(re)
+rmw_ca      1                               // load states
+rdc_da      1                               // load imag synaptic input  
+next
+
+:save_states
+add_sat     tmp2_ls     tmp3_ls             // tmp2_ls = im * lct + re * lst
+add_sat     tmp2_ls     da                  // tmp2_ls = im * lct + re * lst + da_(im)
+mov         re          tmp0_ls             // re = re * lct - im * lst + da_(re)
+mov         im          tmp2_ls             // im = im * lct + re * lst + da_(im)
+abs         tmp2_ls     im                  // tmp2_ls = abs(im)
+abs         tmp0_ls     re                  // tmp0_ls = abs(re)
+add_sat     tmp0_ls     tmp2_ls             // tmp0_ls = abs(re) + abs(im) = mag
+rmw_ca      3                               // load upp and wid
+next
+// tmp0_ls = abs(re) + abs(im) = mag
+
+// Upper estimation
+:upper
+mov         tmp1_ls     0                   // tmp1_ls = 0
+//
+cmp_skp_le  5           tmp0_ls     upp     // skip next 5 lines if mag <= upp
+mov         tmp1_ls     tmp0_ls             // tmp1_ls = mag
+sub         tmp1_ls     upp                 // tmp1_ls = mag - upp
+mov         upp         tmp0_ls             // upp = mag    
+rmw_ca      0                               // load grad   
+jmp         gradient                        //
+//
+rmw_ca      3                               // load upp and wid
+next
+// tmp0_ls = abs(re) + abs(im) = mag
+// tmp1_ls = (mag - upp) * (mag>upp) = d_upp
+
+
+// Width estimation
+// if we are here: mag<=upp
+:width            
+mov         tmp2_ls     upp                 // tmp2_ls = upp
+sub         tmp2_ls     tmp0_ls             // tmp2_ls = upp - mag (no overflow danger since mag<=upp)
+sub         tmp2_ls     wid                 // tmp2_ls = upp - mag - wid (potential overflow danger!)
+max         tmp2_ls     0                   // tmp2_ls = upp - mag - wid  * ((upp - mag) > wid) = d_wid
+add_sat     wid         tmp2_ls         
+sub         tmp1_ls     tmp2_ls             // tmp1_ls = d_upp - d_wid
+rmw_ca      0                               
+next
+// tmp2_ls = upp - mag - wid  * ((upp - mag) > wid) = d_wid
+
+
+// grd = (1-alpha) * grd + alpha * ((d_upp - d_wid)<<15-grd_sh)
+// bit shift gradient estimate (d_upp - d_wid) since we multiply it by a alpha around 0.001
+:gradient
+cmp_skp_gt  1           time        t_grd       // start gradient estimation only after t=t_grd
+end                                             // start gradient estimation only after t=t_grd
+mul_rd      15          grd         beta_grd    // grd = (1-alpha) * grd
+mul_rd      grd_sh      tmp1_ls     alpha_grd   // tmp1_ls = alpha * ((d_upp - d_wid)<<(15-shl_grd)) (potential overflow)
+add_sat     grd         tmp1_ls                 // grd = (1-alpha) * grd + alpha * ((d_upp - d_wid)<<15-grd_sh)
+rmw_ca      0      
+mov         tmp2_lu     grd                     // tmp2_lu = grd                     
+next
+// tmp2_lu = grd
+
+:log_encode_0
+cmp_skp_ge  1           time        t_enc       // if time < t_enc, return
+end
+mov         tmp1_lu     thresh                  // tmp1_lu = thresh
+sub         tmp1_lu     tmp2_lu                 // tmp1_lu = thresh - grd
+rmw_ca      4     
+next
+// tmp1_lu = thresh - grd
+// tmp2_lu = grd
+
+:log_encode_1
+cmp_skp_eq  1           block       0           // if blocked, return
+end
+//
+add         out_enc     1
+add_sat     tmp2_lu     u                       // tmp2_lu = u + grd
+mul_rz      15          tmp2_lu     tau_inv     // tmp0_ls = (u + grd) / tau
+add_sat     u           tmp2_lu                 // u += (u + grd) / tau
+cmp_skp_lt  3           u           tmp1_lu     // spike cond: u >= thresh - grd
+mov         block       1                       // block neuron from further spikes
+spike       0

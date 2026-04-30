@@ -1,0 +1,147 @@
+// INTEL CORPORATION CONFIDENTIAL AND PROPRIETARY
+//
+// Copyright © 2021-2022 Intel Corporation.
+//
+// This software and the related documents are Intel copyrighted
+// materials, and your use of them is governed by the express
+// license under which they were provided to you (License). Unless
+// the License provides otherwise, you may not use, modify, copy,
+// publish, distribute, disclose or transmit  this software or the
+// related documents without Intel's prior written permission.
+//
+// This software and the related documents are provided as is, with
+// no express or implied warranties, other than those that are
+// expressly stated in the License.
+
+// ----------------------------------------------------------------------------------- //
+// ----------------------------------------------------------------------------------- // 
+// SpiNR Neuron with rate encoding:                                        
+// - no da bit shift directly but instead by setting synapse weight exponent to e.g. -9
+// - gradient estimate as wu -> no negative values
+// - gradient estimate starts at t_grd
+// ----------------------------------------------------------------------------------- // 
+// ----------------------------------------------------------------------------------- // 
+
+.RmwCA=1        // Read first internal state on first pass
+.RdcDA=1        // Read first dendritic acc on first pass
+.StrideCA=3     // Number of 64-bit internal state entries owned by each neuron
+.StrideDA=2     // Number of da inputs owned by each neurons
+.StrideSA=1     // Number of output axon programs owned by each neuron TODO
+.RmwDA=0        // Un-used (learning)
+.StridePA=0     // Un-used (learning)
+
+
+.mem:CA[0] {
+ ws im;         // imag state
+ ws re;         // real state
+ ws lct;        // real rotation factor: lambda*cosine(theta)*(1<<15)
+ ws lst;        // imag rotation factor: lambda*sine(theta)*(1<<15)
+}
+.mem:CA[1] {
+ wu upp;        // upper threshold
+ wu wid;        // width threshold
+ wu grd;        // gradient estimate, state for LIF
+ wu ts;
+}
+// rate encode
+.mem:CA[2] {
+ lu u;
+ wu n_enc;      // debug readout: number of sent spikes
+ wu;bu;
+}
+
+// Constants over all neurons
+.constant:alpha_grd     // alpha_gradient*(1<<15)
+.constant:beta_grd      // (1-alpha_gradient)*(1<<15)
+.constant:grd_sh        // shift factor to scale gradient estimate: alpha_grd * ((d_upp - d_wid)<<(15-grd_sh))
+.constant:t_grd         // gradient estimation starts only at t=t_grd
+.constant:tau_inv       // rate encoding (1/tau)*(1<<15)
+.constant:thresh        // rate encoding threshold
+.constant:t_enc         // encoding tarts only at t=t_enc    
+
+// Temporary register: da data in lower 4 bytes
+.var:da@t0ws    // da input: multiple inputs can be accessed in different passes
+
+// "s" register (persistent between passes, init to zero on first pass)
+.var:tmp0@s0ws 
+.var:tmp1@s2ws 
+.var:mag@s0wu   // unsigned and same size as im/re 
+.var:d_upp@r0ws 
+.var:d_wid@r2ws 
+
+.var:ts_@r4wu   // copy of ts so we can access it in encoding pass as well
+
+.var:tmp0_ls@s0ls 
+
+
+// Real rotation: re = lct * re - lst * im + re_input
+:real
+mov         tmp0    im 		            // tmp0 = im
+mov         tmp1    re                  // tmp1 = re
+mul_rd      15      tmp0    lst         // tmp0 = lst * im
+mul_rd      15      re      lct         // re = lct * re
+sub         re      tmp0                // re = lct * re - lst * im (potential overflow danger!)
+add_sat     re      da                  // re = lct * re - lst * im + re_inpu
+rmw_ca      0                           // read CA[0] on next pass
+rdc_da      1                           // read imaginary input on next pass
+next
+
+// Imaginary rotation: im = lct * im + lst * re + im_input
+// magniture estimation: mag = abs(re) + abs(im)
+// -> no possible overflow issues here since re/im are <ws> and mag is <wu>
+:imag
+mul_rd      15      tmp1    lst         // tmp1 = lst * re
+mul_rd      15      im      lct         // im = lct * im
+add_sat     im      tmp1                // im = lct * im + lst * re
+add_sat     im      da                  // im = lct * im + lst * re + im_input
+abs         mag     re                  // mag = abs(re)
+abs         tmp1    im                  // tmp1 = abs(im)
+add_sat     mag     tmp1                // mag = abs(re) + abs(im)
+rmw_ca      1                           // read CA[1] on next pass
+next
+
+// d_upp = (mag - upp) * (mag>upp) 
+:upper
+add_sat     ts      1                   // increment timestep
+mov         ts_     ts                  // copy ts to ts_ so we can access in encoding pass
+rmw_ca      1                           // read CA[1] on next pass
+cmp_skp_le  4       mag      upp        // skip next 4 lines if mag <= upp
+mov         d_upp   mag                 // d_upp = mag
+sub         d_upp   upp                 // d_upp = mag - upp (no overflow danger since mag>upp)
+mov         upp     mag                 // update upper limit: upp = mag
+jmp         gradient                    // jump to gradient estimation as wid must not be updated
+next
+
+// if we are here: mag<=upp
+:width
+rmw_ca      1                           // read CA[1] on next pass
+mov         d_wid   upp                 // d_wid = upp
+sub         d_wid   mag                 // d_wid = upp - mag (no overflow danger since mag<=upp)
+sub         d_wid   wid                 // d_wid = upp - mag - wid (potential overflow danger!)
+max         d_wid   0                   // d_wid = upp - mag - wid  * ((upp - mag) > wid)
+add_sat     wid     d_wid         
+next
+
+// grd = (1-alpha) * grd + alpha * ((d_upp - d_wid)<<15-grd_sh)
+// bit shift gradient estimate (d_upp - d_wid) since we multiply it by a alpha around 0.001
+:gradient
+rmw_ca      2                           // read CA[2] on next pass
+cmp_skp_gt  1       ts     t_grd        // start gradient estimation only after t=t_grd
+end                                     // start gradient estimation only after t=t_grd
+mul_rd      15      grd    beta_grd     // grd = (1-alpha) * grd
+sub         d_upp   d_wid               // d_upp = d_upp - d_wid
+mul_rd      grd_sh  d_upp  alpha_grd    // d_upp = alpha * ((d_upp - d_wid)<<(15-shl_grd)) (potential overflow)
+add_sat     grd     d_upp               // grd = (1-alpha) * grd + alpha * ((d_upp - d_wid)<<15-grd_sh)
+mov         grd_    grd
+next
+
+:rate_encode 
+cmp_skp_ge  1       ts_         t_enc       // if ts < t_enc, return
+end
+sub         tmp0_ls u                       // tmp0_ls = grd - u
+mul_rz      15      tmp0_ls     tau_inv     // tmp0_ls = (grd - u) / tau
+add_sat     u       tmp0_ls                 // u += (grd - u) / tau
+cmp_skp_lt  3       u           thresh      // spike cond: u >= thresh
+sub         u       thresh                  // u -= thresh
+add         n_enc   1
+spike       0

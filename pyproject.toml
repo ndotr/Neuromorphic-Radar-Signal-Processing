@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nrsp"  # Add this line to specify the name of your project
+version = "1.0"
+description = "Neuromorphic Radar Signal Processing"
+authors = [
+  { name = "Nico Reeb", email = "nico.reeb@tum.de" }
+]
+dependencies = [
+  "numpy",
+  "matplotlib",
+  "seaborn",
+  "scipy",
+  "cupy"
+]
+[tool.setuptools]
+packages = ["nrsp"]
