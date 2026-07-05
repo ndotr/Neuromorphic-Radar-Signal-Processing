@@ -24,7 +24,7 @@ This paper introduces and evaluates:
 - GPU Implementation
 - Intel Loihi 2 Implementation
 
-![SpiNR dynamics with AGS](results/ags/plots/spinr_dynamics_with_ags.pdf)
+![SpiNR dynamics with AGS](results/ags/plots/spinr_dynamics_with_ags.png)
 
 *Figure: Exemplary dynamics of the SpiNR model with AGS.*
 
